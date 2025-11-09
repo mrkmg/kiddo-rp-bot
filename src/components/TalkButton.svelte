@@ -138,6 +138,7 @@ async function handlePressEnd(event: MouseEvent | TouchEvent) {
     playBeep('stop');
     
     // Stop recording and get audio blob
+    // This will throw an error if VAD detected no speech
     const audioBlob = await sttService.stopRecording();
     
     // Check if audio blob is valid
@@ -153,7 +154,7 @@ async function handlePressEnd(event: MouseEvent | TouchEvent) {
     // Transcribe audio
     const result = await sttService.transcribe(audioBlob);
     
-    // Handle no speech detected
+    // Handle no speech detected (backup check, VAD should catch this earlier)
     if (!result.text || result.text.trim().length === 0) {
       errorMessage = 'No speech detected. Please speak louder and try again.';
       turnController.reset();
@@ -188,11 +189,21 @@ async function handlePressEnd(event: MouseEvent | TouchEvent) {
     
     // Provide specific error messages
     const errorMsg = error instanceof Error ? error.message : 'Transcription failed';
-    if (errorMsg.toLowerCase().includes('network') || errorMsg.toLowerCase().includes('offline')) {
+    if (errorMsg.toLowerCase().includes('no speech detected')) {
+      // VAD detected no speech - this is expected behavior, not an error
+      errorMessage = errorMsg;
+      turnController.reset();
+      
+      // Clear error after 3 seconds
+      setTimeout(() => {
+        errorMessage = null;
+      }, 3000);
+      return;
+    } else if (errorMsg.toLowerCase().includes('network') || errorMsg.toLowerCase().includes('offline')) {
       errorMessage = 'No internet connection. Please check your network.';
     } else if (errorMsg.toLowerCase().includes('timeout')) {
       errorMessage = 'Request timed out. Please try again.';
-    } else if (errorMsg.toLowerCase().includes('inaudible') || errorMsg.toLowerCase().includes('no speech')) {
+    } else if (errorMsg.toLowerCase().includes('inaudible')) {
       errorMessage = 'Could not hear you clearly. Please speak louder.';
     } else {
       errorMessage = 'Transcription failed. Please try again.';

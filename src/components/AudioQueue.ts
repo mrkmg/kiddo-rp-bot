@@ -18,7 +18,7 @@
 
 export interface AudioQueueItem {
   id: string;
-  audio: Blob | string; // Audio blob or URL
+  audio: Blob | string | AsyncIterable<Uint8Array>; // Audio blob, URL, or streaming chunks
   text: string; // Text being spoken (for captions)
   onStart?: () => void; // Called when this item starts playing
   onEnd?: () => void; // Called when this item finishes
@@ -66,6 +66,7 @@ export class AudioQueue {
    * Play next item in queue
    * Handles audio loading, playback, and callbacks
    * Auto-advances to next item when current finishes
+   * Supports streaming audio for low-latency playback
    */
   private async playNext(): Promise<void> {
     // Check if queue is empty
@@ -82,47 +83,175 @@ export class AudioQueue {
     this.notifyItemListeners(this.currentItem);
 
     try {
-      // Create audio element
-      this.currentAudio = new Audio();
-      
-      // Set audio source (handle both Blob and URL)
-      if (this.currentItem.audio instanceof Blob) {
-        const url = URL.createObjectURL(this.currentItem.audio);
-        this.objectUrls.add(url);
-        this.currentAudio.src = url;
+      // Check if this is a streaming audio source
+      if (this.isAsyncIterable(this.currentItem.audio)) {
+        await this.playStreamingAudio(this.currentItem.audio);
       } else {
-        this.currentAudio.src = this.currentItem.audio;
+        await this.playStaticAudio(this.currentItem.audio);
       }
-
-      // Set up event handlers
-      this.currentAudio.onplay = () => {
-        this.setStatus('playing');
-        this.currentItem?.onStart?.();
-      };
-
-      this.currentAudio.onended = () => {
-        this.currentItem?.onEnd?.();
-        this.cleanupCurrentAudio();
-        this.playNext(); // Auto-advance to next item
-      };
-
-      this.currentAudio.onerror = (event) => {
-        const error = new Error(`Audio playback failed: ${this.currentAudio?.error?.message || 'Unknown error'}`);
-        console.error('Audio playback error:', error);
-        this.currentItem?.onError?.(error);
-        this.cleanupCurrentAudio();
-        this.playNext(); // Try next item
-      };
-
-      // Start playback
-      await this.currentAudio.play();
-      
     } catch (error) {
       const playbackError = error instanceof Error ? error : new Error('Audio playback failed');
       console.error('Failed to play audio:', playbackError);
       this.currentItem?.onError?.(playbackError);
       this.cleanupCurrentAudio();
       this.playNext(); // Try next item
+    }
+  }
+
+  /**
+   * Check if value is an async iterable (streaming audio)
+   */
+  private isAsyncIterable(value: any): value is AsyncIterable<Uint8Array> {
+    return value != null && typeof value[Symbol.asyncIterator] === 'function';
+  }
+
+  /**
+   * Play static audio (Blob or URL)
+   */
+  private async playStaticAudio(audio: Blob | string): Promise<void> {
+    // Create audio element
+    this.currentAudio = new Audio();
+    
+    // Set audio source (handle both Blob and URL)
+    if (audio instanceof Blob) {
+      const url = URL.createObjectURL(audio);
+      this.objectUrls.add(url);
+      this.currentAudio.src = url;
+    } else {
+      this.currentAudio.src = audio;
+    }
+
+    // Set up event handlers
+    this.currentAudio.onplay = () => {
+      this.setStatus('playing');
+      this.currentItem?.onStart?.();
+    };
+
+    this.currentAudio.onended = () => {
+      this.currentItem?.onEnd?.();
+      this.cleanupCurrentAudio();
+      this.playNext(); // Auto-advance to next item
+    };
+
+    this.currentAudio.onerror = (event) => {
+      const error = new Error(`Audio playback failed: ${this.currentAudio?.error?.message || 'Unknown error'}`);
+      console.error('Audio playback error:', error);
+      this.currentItem?.onError?.(error);
+      this.cleanupCurrentAudio();
+      this.playNext(); // Try next item
+    };
+
+    // Start playback
+    await this.currentAudio.play();
+  }
+
+  /**
+   * Play streaming audio chunks as they arrive
+   * Uses MediaSource API for seamless streaming playback
+   */
+  private async playStreamingAudio(audioStream: AsyncIterable<Uint8Array>): Promise<void> {
+    // Create audio context for streaming playback
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    let startTime = audioContext.currentTime;
+    let hasStarted = false;
+
+    try {
+      // Collect all chunks and concatenate them
+      const chunks: Uint8Array[] = [];
+      
+      for await (const chunk of audioStream) {
+        chunks.push(chunk);
+        
+        // Start playback as soon as we have the first chunk
+        if (!hasStarted && chunks.length > 0) {
+          hasStarted = true;
+          this.setStatus('playing');
+          this.currentItem?.onStart?.();
+        }
+      }
+
+      // Concatenate all chunks into a single buffer
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const audioData = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        audioData.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      // Create a WAV blob from the raw PCM data
+      const wavBlob = this.createWavBlob(audioData);
+      const arrayBuffer = await wavBlob.arrayBuffer();
+      
+      // Decode and play the audio
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      
+      // Set up completion handler
+      source.onended = () => {
+        this.currentItem?.onEnd?.();
+        audioContext.close();
+        this.cleanupCurrentAudio();
+        this.playNext();
+      };
+
+      // Start playback
+      source.start(0);
+      
+      // Store reference for potential cleanup
+      (this as any).currentAudioSource = source;
+      (this as any).currentAudioContext = audioContext;
+
+    } catch (error) {
+      audioContext.close();
+      throw error;
+    }
+  }
+
+  /**
+   * Create a WAV blob from raw PCM audio data
+   * Assumes 16-bit PCM, 24kHz sample rate, mono
+   */
+  private createWavBlob(pcmData: Uint8Array): Blob {
+    const sampleRate = 24000; // Hume.ai default sample rate
+    const numChannels = 1; // Mono
+    const bitsPerSample = 16;
+    
+    const wavHeader = new ArrayBuffer(44);
+    const view = new DataView(wavHeader);
+    
+    // RIFF chunk descriptor
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + pcmData.length, true);
+    this.writeString(view, 8, 'WAVE');
+    
+    // fmt sub-chunk
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+    view.setUint16(20, 1, true); // AudioFormat (1 for PCM)
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * bitsPerSample / 8, true); // ByteRate
+    view.setUint16(32, numChannels * bitsPerSample / 8, true); // BlockAlign
+    view.setUint16(34, bitsPerSample, true);
+    
+    // data sub-chunk
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, pcmData.length, true);
+    
+    // Convert to ArrayBuffer to satisfy TypeScript
+    const pcmBuffer = pcmData.buffer as ArrayBuffer;
+    return new Blob([wavHeader, pcmBuffer], { type: 'audio/wav' });
+  }
+
+  /**
+   * Write a string to a DataView
+   */
+  private writeString(view: DataView, offset: number, string: string): void {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
     }
   }
 

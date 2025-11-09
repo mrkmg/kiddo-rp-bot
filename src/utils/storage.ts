@@ -24,6 +24,7 @@ export interface Settings {
   llmModel?: string;
   audioEnabled?: boolean;
   devMode?: boolean;
+  selectedMicrophoneId?: string;
 }
 
 export interface LLMLogEntry {
@@ -177,6 +178,7 @@ export function getSettings(): Settings {
     llmModel: 'anthropic/claude-3-haiku',
     audioEnabled: true,
     devMode: false,
+    selectedMicrophoneId: '',
   };
 }
 

@@ -1,11 +1,88 @@
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { VitePWA } from 'vite-plugin-pwa'
+import { viteStaticCopy } from 'vite-plugin-static-copy'
+import fs from 'fs'
+import path from 'path'
 
 // https://vite.dev/config/
 export default defineConfig({
+  optimizeDeps: {
+    include: ['@ricky0123/vad-web'],
+  },
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+    fs: {
+      allow: ['..']
+    }
+  },
+  publicDir: 'public',
   plugins: [
     svelte(),
+    // Copy VAD assets for production build
+    viteStaticCopy({
+      targets: [
+        {
+          src: 'node_modules/@ricky0123/vad-web/dist/*.onnx',
+          dest: 'vad'
+        },
+        {
+          src: 'node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
+          dest: 'vad'
+        },
+        {
+          src: 'node_modules/onnxruntime-web/dist/*.wasm',
+          dest: 'vad'
+        }
+      ]
+    }),
+    // Plugin to serve VAD assets in dev mode
+    {
+      name: 'vad-assets-dev',
+      configureServer(server) {
+        server.middlewares.use((req, res, next) => {
+          if (req.url?.startsWith('/vad/')) {
+            // Remove query parameters (e.g., ?import)
+            const fileName = req.url.replace('/vad/', '').split('?')[0]
+            
+            // Try vad-web dist first
+            let filePath = path.join(__dirname, 'node_modules/@ricky0123/vad-web/dist', fileName)
+            if (fs.existsSync(filePath)) {
+              const ext = path.extname(fileName)
+              const mimeTypes: Record<string, string> = {
+                '.wasm': 'application/wasm',
+                '.onnx': 'application/octet-stream',
+                '.js': 'application/javascript',
+                '.mjs': 'application/javascript'
+              }
+              res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream')
+              res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp')
+              res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+              return fs.createReadStream(filePath).pipe(res)
+            }
+            
+            // Try onnxruntime-web dist
+            filePath = path.join(__dirname, 'node_modules/onnxruntime-web/dist', fileName)
+            if (fs.existsSync(filePath)) {
+              const ext = path.extname(fileName)
+              const mimeTypes: Record<string, string> = {
+                '.wasm': 'application/wasm',
+                '.js': 'application/javascript',
+                '.mjs': 'application/javascript'
+              }
+              res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream')
+              res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp')
+              res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+              return fs.createReadStream(filePath).pipe(res)
+            }
+          }
+          next()
+        })
+      }
+    },
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'mask-icon.svg'],
@@ -39,7 +116,7 @@ export default defineConfig({
         ]
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,wasm}'],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/api\.openai\.com\/.*/i,

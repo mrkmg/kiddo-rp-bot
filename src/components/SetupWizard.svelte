@@ -12,8 +12,9 @@
  */
 
 import { sessionStore, type Player } from '../stores/session';
-import { requestMicrophonePermission, checkMicrophonePermission } from '../utils/permissions';
+import { requestMicrophonePermission, checkMicrophonePermission, getMicrophoneDevices } from '../utils/permissions';
 import { validateTheme, sanitizePlayerName } from '../utils/safety';
+import { getSettings, saveSettings } from '../utils/storage';
 
 // Props
 interface Props {
@@ -29,6 +30,10 @@ let currentStep = $state<WizardStep>('welcome');
 let isLoading = $state(false);
 let errorMessage = $state<string | null>(null);
 let hasMicrophoneAccess = $state(false);
+
+// Microphone selection
+let availableMicrophones = $state<MediaDeviceInfo[]>([]);
+let selectedMicrophoneId = $state<string>('');
 
 // Session data
 let theme = $state('');
@@ -113,6 +118,23 @@ function previousStep() {
 }
 
 /**
+ * Load available microphones
+ */
+async function loadMicrophones() {
+  try {
+    const devices = await getMicrophoneDevices();
+    availableMicrophones = devices;
+    
+    // Auto-select the first microphone if available
+    if (devices.length > 0 && !selectedMicrophoneId) {
+      selectedMicrophoneId = devices[0].deviceId;
+    }
+  } catch (error) {
+    console.error('Failed to load microphones:', error);
+  }
+}
+
+/**
  * Request microphone permission
  */
 async function handleRequestPermission() {
@@ -122,6 +144,8 @@ async function handleRequestPermission() {
   try {
     const granted = await requestMicrophonePermission();
     if (granted) {
+      // Load available microphones after permission is granted
+      await loadMicrophones();
       nextStep();
     } else {
       errorMessage = 'Microphone permission is required to play. Please allow access and try again.';
@@ -196,6 +220,13 @@ function createSession() {
   errorMessage = null;
   
   try {
+    // Save selected microphone to settings
+    if (selectedMicrophoneId) {
+      const settings = getSettings();
+      settings.selectedMicrophoneId = selectedMicrophoneId;
+      saveSettings(settings);
+    }
+    
     sessionStore.createSession(theme, players);
     onComplete?.();
   } catch (error) {
@@ -217,6 +248,17 @@ function handleSkipToSettings() {
 async function checkInitialPermission() {
   const status = await checkMicrophonePermission();
   hasMicrophoneAccess = status === 'granted';
+  
+  // If we already have permission, load available microphones
+  if (hasMicrophoneAccess) {
+    await loadMicrophones();
+    
+    // Load previously selected microphone from settings
+    const settings = getSettings();
+    if (settings.selectedMicrophoneId) {
+      selectedMicrophoneId = settings.selectedMicrophoneId;
+    }
+  }
 }
 
 // Check permission when component mounts
@@ -286,9 +328,32 @@ checkInitialPermission();
         <h2 class="text-3xl font-bold text-gray-900">Microphone Access</h2>
         
         <p class="text-gray-600 text-lg">
-          To play, I need to hear your voice! 
+          To play, I need to hear your voice!
           Please allow microphone access so we can talk together.
         </p>
+        
+        {#if hasMicrophoneAccess && availableMicrophones.length > 0}
+          <!-- Microphone Selector -->
+          <div class="text-left">
+            <label for="microphone-select" class="block text-sm font-bold text-gray-700 mb-2">
+              Select Microphone:
+            </label>
+            <select
+              id="microphone-select"
+              bind:value={selectedMicrophoneId}
+              class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-lg focus:border-blue-600 focus:outline-none bg-white"
+            >
+              {#each availableMicrophones as mic}
+                <option value={mic.deviceId}>
+                  {mic.label || `Microphone ${availableMicrophones.indexOf(mic) + 1}`}
+                </option>
+              {/each}
+            </select>
+            <p class="text-sm text-gray-500 mt-2">
+              {availableMicrophones.length} microphone{availableMicrophones.length !== 1 ? 's' : ''} detected
+            </p>
+          </div>
+        {/if}
         
         {#if errorMessage}
           <div class="bg-red-50 border-l-4 border-red-400 p-4 text-left">
@@ -303,13 +368,22 @@ checkInitialPermission();
           >
             Back
           </button>
-          <button
-            onclick={handleRequestPermission}
-            disabled={isLoading}
-            class="flex-1 py-3 text-lg font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors duration-200 disabled:opacity-50"
-          >
-            {isLoading ? 'Requesting...' : 'Allow Microphone'}
-          </button>
+          {#if hasMicrophoneAccess}
+            <button
+              onclick={nextStep}
+              class="flex-1 py-3 text-lg font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors duration-200"
+            >
+              Continue
+            </button>
+          {:else}
+            <button
+              onclick={handleRequestPermission}
+              disabled={isLoading}
+              class="flex-1 py-3 text-lg font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors duration-200 disabled:opacity-50"
+            >
+              {isLoading ? 'Requesting...' : 'Allow Microphone'}
+            </button>
+          {/if}
         </div>
       </div>
       

@@ -24,6 +24,11 @@ export interface SpeechResult {
   duration?: number;
 }
 
+export interface StreamingSpeechResult {
+  audioStream: AsyncIterable<Uint8Array>;
+  cancel: () => void;
+}
+
 /**
  * Text-to-Speech service using Hume.ai
  */
@@ -41,7 +46,121 @@ export class TTSService {
   }
 
   /**
-   * Convert text to speech and return audio
+   * Convert text to speech using streaming for lower latency
+   * Audio chunks are returned as they're generated, allowing playback to start immediately
+   *
+   * @param request - Speech request with text and optional voice
+   * @returns Streaming speech result with async iterable of audio chunks
+   */
+  async synthesizeStreaming(request: SpeechRequest): Promise<StreamingSpeechResult> {
+    if (!this.config.apiKey) {
+      throw new Error('Hume API key not configured');
+    }
+
+    const controller = new AbortController();
+    
+    try {
+      // Use Hume.ai streaming endpoint for low latency
+      const response = await fetch(`${this.config.baseUrl}/tts/stream/json`, {
+        method: 'POST',
+        headers: {
+          'X-Hume-Api-Key': this.config.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          utterances: [
+            {
+              text: request.text,
+              voice: {
+                name: request.voiceId || this.config.voiceId || 'Ava Song',
+                provider: 'HUME_AI'
+              }
+            }
+          ],
+          version: '2',
+          instant_mode: true, // Enable instant mode for lowest latency
+          strip_headers: true, // Strip WAV headers for easier streaming
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(
+          `Hume TTS streaming API error: ${response.status} - ${errorData.message || response.statusText}`
+        );
+      }
+
+      if (!response.body) {
+        throw new Error('No response body for streaming');
+      }
+
+      // Create async generator for audio chunks
+      const audioStream = this.createAudioStream(response.body);
+
+      return {
+        audioStream,
+        cancel: () => controller.abort(),
+      };
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        throw new Error('TTS streaming request was cancelled');
+      }
+      throw new Error(`Streaming text-to-speech failed: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Create an async iterable stream of audio chunks from the response body
+   * Parses newline-delimited JSON chunks and extracts base64 audio
+   */
+  private async *createAudioStream(body: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) break;
+
+        // Decode chunk and add to buffer
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete JSON objects (newline-delimited)
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          try {
+            const chunk = JSON.parse(line);
+            
+            // Extract audio from chunk
+            if (chunk.audio) {
+              // Decode base64 audio to binary
+              const binaryString = atob(chunk.audio);
+              const bytes = new Uint8Array(binaryString.length);
+              for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+              }
+              yield bytes;
+            }
+          } catch (parseError) {
+            console.warn('Failed to parse streaming chunk:', parseError);
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  /**
+   * Convert text to speech and return audio (non-streaming)
+   * Use synthesizeStreaming() for lower latency
    *
    * @param request - Speech request with text and optional voice
    * @returns Speech result with audio data

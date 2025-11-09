@@ -24,13 +24,14 @@ let hasRolled = $state(false);
 let rotation = $state({ x: 0, y: 0, z: 0 });
 
 // Dice face positions (rotation angles to show each face)
+// These must match the CSS transforms for each face
 const diceFaces = {
-  1: { x: 0, y: 0, z: 0 },
-  2: { x: 0, y: -90, z: 0 },
-  3: { x: 0, y: 0, z: 90 },
-  4: { x: 0, y: 0, z: -90 },
-  5: { x: 0, y: 90, z: 0 },
-  6: { x: 180, y: 0, z: 0 },
+  1: { x: 0, y: 0, z: 0 },        // front: rotateY(0deg)
+  2: { x: 0, y: -90, z: 0 },       // right: rotateY(90deg)
+  3: { x: -90, y: 0, z: 0 },       // top: rotateX(90deg)
+  4: { x: 90, y: 0, z: 0 },      // bottom: rotateX(-90deg)
+  5: { x: 0, y: 90, z: 0 },      // left: rotateY(-90deg)
+  6: { x: 0, y: 180, z: 0 },      // back: rotateY(180deg)
 };
 
 /**
@@ -46,8 +47,17 @@ function rollDice() {
   // Generate random result (1-6)
   const result = Math.floor(Math.random() * 6) + 1;
   
-  // Animate the roll with multiple spins
-  const spins = 3 + Math.random() * 2; // 3-5 full rotations
+  // Get target face rotation
+  const targetFace = diceFaces[result as keyof typeof diceFaces];
+  
+  // Calculate total rotations needed (multiple full spins + final position)
+  const baseSpins = 3 + Math.floor(Math.random() * 3); // 3-5 full rotations
+  const totalRotation = {
+    x: baseSpins * 360 + targetFace.x,
+    y: baseSpins * 360 + targetFace.y,
+    z: baseSpins * 360 + targetFace.z,
+  };
+  
   const duration = 2000; // 2 seconds
   const startTime = Date.now();
   
@@ -59,17 +69,25 @@ function rollDice() {
     const eased = 1 - Math.pow(1 - progress, 3);
     
     if (progress < 1) {
-      // Spinning animation
+      // Add wobble that decreases over time
+      const wobbleStrength = Math.max(0, (1 - progress) * 20);
+      const wobble = {
+        x: Math.sin(progress * Math.PI * 8) * wobbleStrength,
+        y: Math.cos(progress * Math.PI * 6) * wobbleStrength,
+        z: Math.sin(progress * Math.PI * 10) * wobbleStrength,
+      };
+      
+      // Smoothly rotate to final position
       rotation = {
-        x: eased * spins * 360 + Math.sin(progress * Math.PI * 8) * 30,
-        y: eased * spins * 360 + Math.cos(progress * Math.PI * 6) * 30,
-        z: eased * spins * 360 + Math.sin(progress * Math.PI * 10) * 30,
+        x: eased * totalRotation.x + wobble.x,
+        y: eased * totalRotation.y + wobble.y,
+        z: eased * totalRotation.z + wobble.z,
       };
       requestAnimationFrame(animate);
     } else {
-      // Land on final result
+      // Land cleanly on final result
       diceValue = result;
-      rotation = diceFaces[result as keyof typeof diceFaces];
+      rotation = { ...totalRotation };
       isRolling = false;
       
       // Show result after a brief delay
@@ -79,7 +97,7 @@ function rollDice() {
         // Call completion callback after showing result
         setTimeout(() => {
           onRollComplete(result);
-        }, 1500);
+        }, 3000);
       }, 300);
     }
   };

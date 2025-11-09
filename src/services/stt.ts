@@ -1,17 +1,21 @@
 /**
  * Speech-to-Text Service
- * 
+ *
  * Handles audio recording and transcription using OpenAI Whisper API
  * - Captures audio from microphone using MediaRecorder
+ * - Uses VAD (Voice Activity Detection) to reject non-speech audio
  * - Converts audio to appropriate format (webm/ogg)
  * - Uploads to OpenAI Whisper API for transcription
  * - Returns transcribed text
  */
 
+import { VADService } from './vad';
+
 export interface STTConfig {
   apiKey: string;
   model?: string;
   language?: string;
+  enableVAD?: boolean;
 }
 
 export interface TranscriptionResult {
@@ -59,13 +63,20 @@ export class STTService {
   private mediaRecorder: MediaRecorder | null = null;
   private audioChunks: Blob[] = [];
   private stream: MediaStream | null = null;
+  private vadService: VADService | null = null;
 
   constructor(config: STTConfig) {
     this.config = {
       model: 'whisper-1',
       language: 'en',
+      enableVAD: true,
       ...config,
     };
+    
+    // Initialize VAD if enabled
+    if (this.config.enableVAD) {
+      this.vadService = new VADService();
+    }
   }
 
   /**
@@ -73,14 +84,27 @@ export class STTService {
    */
   async startRecording(): Promise<void> {
     try {
-      // Request microphone access
-      this.stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100,
-        } 
-      });
+      // Request microphone access if we don't have a stream
+      if (!this.stream) {
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            sampleRate: 44100,
+          }
+        });
+
+        // Initialize VAD once with the stream
+        if (this.config.enableVAD && this.vadService) {
+          await this.vadService.initialize(this.stream);
+        }
+      }
+
+      // Reset VAD state and start for this recording
+      if (this.config.enableVAD && this.vadService) {
+        this.vadService.reset();
+        this.vadService.start();
+      }
 
       // Determine supported MIME type
       const mimeType = this.getSupportedMimeType();
@@ -110,6 +134,7 @@ export class STTService {
 
   /**
    * Stop recording and return audio blob
+   * Throws error if no speech was detected by VAD
    */
   async stopRecording(): Promise<Blob> {
     return new Promise((resolve, reject) => {
@@ -119,6 +144,20 @@ export class STTService {
       }
 
       this.mediaRecorder.onstop = () => {
+        // Check VAD for speech detection
+        if (this.config.enableVAD && this.vadService) {
+          this.vadService.pause();
+          
+          if (!this.vadService.hasSpeech()) {
+            const frameCount = this.vadService.getSpeechFrameCount();
+            console.log(`[STT] No speech detected (frames: ${frameCount})`);
+            reject(new Error('No speech detected. Please speak clearly and try again.'));
+            return;
+          }
+          
+          console.log(`[STT] Speech detected (frames: ${this.vadService.getSpeechFrameCount()})`);
+        }
+        
         const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
         const audioBlob = new Blob(this.audioChunks, { type: mimeType });
         resolve(audioBlob);
@@ -130,10 +169,8 @@ export class STTService {
 
       this.mediaRecorder.stop();
       
-      // Stop all tracks
-      if (this.stream) {
-        this.stream.getTracks().forEach(track => track.stop());
-      }
+      // Don't stop stream tracks - keep them alive for VAD reuse
+      // Tracks will be stopped in cleanup() or destroy()
     });
   }
 
@@ -209,6 +246,12 @@ export class STTService {
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       this.mediaRecorder.stop();
     }
+    
+    // Pause VAD
+    if (this.vadService) {
+      this.vadService.pause();
+    }
+    
     this.cleanup();
   }
 
@@ -247,17 +290,34 @@ export class STTService {
   }
 
   /**
-   * Clean up resources
+   * Clean up resources (but keep stream/VAD alive for reuse)
    */
   cleanup(): void {
+    // Don't stop stream or destroy VAD - keep them for next recording
+    // Only clean up the recorder and chunks
+    this.mediaRecorder = null;
+    this.audioChunks = [];
+  }
+  
+  /**
+   * Destroy service and clean up all resources
+   */
+  destroy(): void {
+    // Stop stream tracks
     if (this.stream) {
       this.stream.getTracks().forEach(track => track.stop());
       this.stream = null;
     }
+    
+    // Destroy VAD
+    if (this.vadService) {
+      this.vadService.destroy();
+      this.vadService = null;
+    }
+    
     this.mediaRecorder = null;
     this.audioChunks = [];
   }
 }
 
 // TODO: Add audio level monitoring for visual feedback
-// TODO: Add silence detection to auto-stop recording

@@ -20,7 +20,6 @@ import {
   clearActiveSession
 } from '../utils/storage';
 
-// Type definitions based on Plan.md schema
 export interface Player {
   name: string;
   bio: string;
@@ -217,6 +216,16 @@ export interface Session {
   transcript: TranscriptEntry[];
   
   llm: LLMConfig;
+  
+  // App State Resumption
+  appState?: {
+    turnState: string;  // Current TurnController state
+    showDiceRoller?: boolean;
+    currentRollDifficulty?: number;
+    pendingDirective?: any;  // SceneDirective waiting to be processed
+    lastPlayerInput?: string;  // Last player input (for resuming from thinking state)
+    lastStateTimestamp?: string;
+  };
 }
 
 // Default session state
@@ -254,6 +263,9 @@ const defaultSession: Session = {
   llm: {
     model: 'anthropic/claude-3-haiku',
     seed: 0,
+  },
+  appState: {
+    turnState: 'idle',
   },
 };
 
@@ -681,6 +693,43 @@ class SessionStore {
    */
   isActive(): boolean {
     return this._session.status === 'active';
+  }
+
+  /**
+   * Update app state for resumption
+   * @param appState - Partial app state to update
+   */
+  updateAppState(appState: Partial<Session['appState']>): void {
+    this._store.update(session => ({
+      ...session,
+      appState: {
+        turnState: session.appState?.turnState || 'idle',
+        ...session.appState,
+        ...appState,
+        lastStateTimestamp: new Date().toISOString(),
+      },
+    }));
+    this.saveSession();
+  }
+
+  /**
+   * Get app state
+   */
+  getAppState(): Session['appState'] {
+    return this._session.appState;
+  }
+
+  /**
+   * Clear app state (reset to idle)
+   */
+  clearAppState(): void {
+    this._store.update(session => ({
+      ...session,
+      appState: {
+        turnState: 'idle',
+      },
+    }));
+    this.saveSession();
   }
 }
 

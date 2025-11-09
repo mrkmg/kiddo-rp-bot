@@ -46,7 +46,7 @@ async function retryWithBackoff<T>(
   baseDelay: number = 1000
 ): Promise<T> {
   let lastError: Error;
-  
+
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await fn();
@@ -58,7 +58,7 @@ async function retryWithBackoff<T>(
       }
     }
   }
-  
+
   throw lastError!;
 }
 
@@ -92,15 +92,34 @@ export class SceneGuideService {
 
     const playerBios = players.map(p => `${p.name}: ${p.bio}`).join('\n');
     const previousContext = previousSceneSummary
-      ? `PREVIOUS SCENE:
+      ? `PREVIOUS SCENE CONTEXT (MAINTAIN CONTINUITY):
 Title: ${previousSceneSummary.title}
 Summary: ${previousSceneSummary.summary}
 Key Events: ${previousSceneSummary.keyEvents.join(', ')}
-Items Gained: ${previousSceneSummary.itemsGained?.join(', ') || 'none'}
-Location End: ${previousSceneSummary.locationEnd}`
-      : 'This is the first scene of the adventure.';
+Items/Abilities Gained: ${previousSceneSummary.itemsGained?.join(', ') || 'none'}
+Location Where Scene Ended: ${previousSceneSummary.locationEnd}
 
-    const prompt = `You are the Scene Guide. Create an engaging scene from the Story Guide's directive.
+CRITICAL: Players start THIS scene exactly where the previous scene ended. They have all items/abilities listed above.`
+      : 'This is the first scene of the adventure. Players have no items yet.';
+
+    const systemPrompt = `You are a Scene Guide creating engaging scenes for kids ages 6-10.
+
+CORE PRINCIPLES:
+- Speak directly to the players using "you" (never "John does" or "Will Sarah...")
+- Design scenes that complete in 3-5 player turns
+- Provide helpful hints through vivid descriptions
+- Keep goals simple and achievable
+- Always return valid JSON only
+
+NARRATION STYLE FOR KIDS:
+- Use descriptive language that hints at possible actions
+- Paint a clear picture of what they see, hear, and can interact with
+- Make the environment feel alive and inviting
+- Subtly guide them by describing interesting details
+- Example: "The old door creaks in the wind, and you notice the rusty handle" (hints they can try the door)
+- Example: "A friendly merchant waves at you from behind colorful stacks of fruit" (hints they can talk to them)`;
+
+    const prompt = `Create an engaging scene from the Story Guide's directive.
 
 SCENE DIRECTIVE:
 Purpose: ${directive.purpose}
@@ -114,34 +133,54 @@ ${previousContext}
 PLAYERS:
 ${playerBios}
 
-Create a focused, completable scene (3-5 player turns) with:
-1. Clear setting and situation
-2. Specific, achievable goal
+SCENE REQUIREMENTS:
+1. Clear setting and situation that CONTINUES from where previous scene ended
+2. Specific, achievable goal (completable in 3-5 turns)
 3. 2-3 possible exits (at least one requires roll)
-4. Opening narration that sets the scene
-5. Open-ended opening question
+4. Opening narration that hints at possible actions
+5. Open-ended opening question that speaks directly to players
+6. ACKNOWLEDGE items/abilities players have from previous scenes - make them relevant when possible
 
-SCENE DESIGN PRINCIPLES:
-- Keep the goal SIMPLE and DIRECT (one clear objective, not multi-step)
-- Design exits that can be reached QUICKLY (avoid complex requirements)
-- Think "micro-scene" - a single interaction or challenge, not a long quest
-- Examples of good goals: "Get past the guard", "Find the key", "Convince the merchant"
-- Examples of bad goals: "Explore the entire castle", "Solve all the mysteries"
+OPENING NARRATION - PROVIDE HELPFUL HINTS:
+- START by acknowledging where players are (from previous scene's locationEnd)
+- If players have items/abilities, subtly reference them as available options
+- Describe what players see, hear, and can interact with
+- Use vivid details that suggest possible actions without being explicit
+- Make interesting objects, characters, or paths stand out in the description
+- Build atmosphere while guiding attention to actionable elements
+- Example: "You spot a narrow gap between the rocks, just wide enough to squeeze through"
+- Example: "The guard yawns and looks away, distracted by something in the distance"
+- Example with item: "You arrive at the locked door. The key you found earlier feels heavy in your pocket"
 
-OPENING NARRATION GUIDELINES:
-- Describe what players see, hear, and the immediate situation
-- Show available options through description, don't list them
-- Build atmosphere and set the scene clearly
-- Keep it focused on the immediate challenge
-
-OPENING QUESTION GUIDELINES:
-- MUST be open-ended, never yes/no questions
+OPENING QUESTION - SPEAK DIRECTLY TO PLAYERS:
+- Address players as "you" - never use character names in questions
+- MUST be open-ended, never yes/no
 - NEVER suggest specific actions ("Would you like to...", "Do you want to...")
-- NEVER offer choices ("Will you use X or Y?", "Should you...")
-- Good questions: "What do you do?", "How do you handle this?", "What's your approach?"
-- Bad questions: "Would you like to follow the constellation?", "Do you open the door?"
-- Let the narration show options, let the question ask what they do
-- Trust players to be creative based on your narration
+- NEVER offer choices ("Will you use X or Y?")
+- Good: "What do you do?", "How do you handle this?", "What's your approach?"
+- Bad: "What does John do?", "Will Sarah open the door?", "Do you want to talk to the guard?"
+
+EXAMPLES OF GOOD OUTPUT:
+{
+  "openingNarration": "You arrive at a tall wooden gate blocking the path. A sleepy guard leans against it, and you notice a small bell hanging nearby. Through the gaps in the gate, you can see a beautiful garden beyond.",
+  "openingQuestion": "What do you do?"
+}
+
+{
+  "openingNarration": "The cave entrance looms before you, dark and mysterious. You hear water dripping inside, and strange glowing mushrooms light the walls near the opening. Your map shows this is the way forward.",
+  "openingQuestion": "How do you want to explore this cave?"
+}
+
+EXAMPLES OF BAD OUTPUT:
+{
+  "openingNarration": "There is a gate. A guard is there.",
+  "openingQuestion": "Does John want to talk to the guard or go around?"
+}
+
+{
+  "openingNarration": "You see a cave.",
+  "openingQuestion": "What does Sarah do?"
+}
 
 Return JSON:
 {
@@ -162,14 +201,14 @@ Return JSON:
       "requiresRoll": false
     }
   ],
-  "openingNarration": "What you say to start the scene (describe what they see, hear, and the situation)",
-  "openingQuestion": "Your opening question for the players - must be open-ended, not yes/no (max 20 words)"
+  "openingNarration": "Vivid description with helpful hints about what players can interact with (50-80 words)",
+  "openingQuestion": "Open-ended question speaking directly to players using 'you' (max 15 words)"
 }`;
 
     const messages: LLMMessage[] = [
       {
         role: 'system',
-        content: 'You are a Scene Guide creating engaging scenes for kids. Always return valid JSON only.',
+        content: systemPrompt,
       },
       {
         role: 'user',
@@ -201,7 +240,7 @@ Return JSON:
 
     // Apply safety filter to user input
     const inputFilter = filterUserInput(playerInput);
-    
+
     if (!inputFilter.safe) {
       console.warn('User input blocked by safety filter:', inputFilter.reason);
       const fallbackResponse = {
@@ -240,10 +279,10 @@ Return JSON:
       3,
       1000
     );
-    
+
     // Apply safety filter to DM response
     const responseFilter = filterDMResponse(parsed);
-    
+
     if (!responseFilter.safe) {
       console.warn('DM response blocked by safety filter:', responseFilter.reason);
       const filteredResponse = responseFilter.filtered as SceneResponse;
@@ -271,7 +310,7 @@ Return JSON:
       .map(i => `${i.speaker === 'DM' ? 'DM' : i.playerName}: ${i.text}`)
       .join('\n');
 
-    const prompt = `You are the Scene Guide. Summarize the completed scene.
+    const prompt = `You are the Scene Guide. Summarize the completed scene for CONTINUITY into the next scene.
 
 SCENE:
 Title: ${scene.title}
@@ -283,24 +322,40 @@ ${conversationHistory}
 
 EXIT TAKEN: ${scene.exitTaken || 'Unknown'}
 
-Create a summary that:
-1. Describes what players accomplished (2-3 sentences)
-2. Lists key events
-3. Notes items/abilities gained
-4. States where players are now
-5. Mentions character growth if any
+Create a summary that captures EVERYTHING needed for the next scene:
 
-IMPORTANT: If players gained any items, maps, abilities, or important information,
-list them in itemsGained so they carry forward to future scenes.
+1. SUMMARY: What players accomplished (2-3 sentences)
+2. KEY EVENTS: Specific actions and outcomes that happened
+3. ITEMS/ABILITIES GAINED: CRITICAL - List EVERY item, ability, knowledge, or tool players acquired
+   - Include physical items (keys, maps, weapons, tools)
+   - Include abilities or skills learned
+   - Include important information or knowledge gained
+   - Include allies or companions who joined them
+4. LOCATION END: EXACTLY where players are and what they're doing when scene ended
+   - Be specific: "standing at the castle gates" not just "at castle"
+   - Include their state: "resting in the tavern" or "running through the forest"
+5. CHARACTER DEVELOPMENT: How characters grew (if any)
 
-IMPORTANT: Include where players are and what they are doing when scene ended in locationEnd.
+CRITICAL PERSISTENCE RULES:
+- itemsGained carries forward to ALL future scenes - be thorough!
+- locationEnd becomes the starting point of the next scene - be precise!
+- Any other persons, animals, companions, etc. that joined players become part of their group going forward
+- If players picked up, found, received, or learned ANYTHING, it goes in itemsGained
+- If unsure whether something counts as an item, INCLUDE IT (better to have too much than miss something)
+
+EXAMPLES OF GOOD itemsGained:
+["golden key from the guard", "map of the forest", "healing potion", "knowledge of the secret password", "friendship with the merchant"]
+
+EXAMPLES OF BAD itemsGained:
+["key"] (too vague - which key?)
+[] (when players clearly found or learned something)
 
 Return JSON:
 {
-  "summary": "2-3 sentence summary",
-  "keyEvents": ["event1", "event2"],
-  "itemsGained": ["item1", "ability1"],
-  "locationEnd": "Where players are now",
+  "summary": "2-3 sentence summary of what happened",
+  "keyEvents": ["specific event 1", "specific event 2", "specific event 3"],
+  "itemsGained": ["every single item/ability/knowledge gained with descriptive names"],
+  "locationEnd": "Precise location and state of players when scene ended",
   "characterDevelopment": "How characters grew" or null
 }`;
 
@@ -334,12 +389,32 @@ Return JSON:
       .join('\n');
 
     const previousContext = previousSceneSummary
-      ? `PREVIOUS SCENE (for continuity):
-${previousSceneSummary.summary}
-Location: ${previousSceneSummary.locationEnd}`
-      : '';
+      ? `PREVIOUS SCENE CONTEXT (MAINTAIN CONTINUITY):
+Summary: ${previousSceneSummary.summary}
+Key Events: ${previousSceneSummary.keyEvents.join(', ')}
+Items/Abilities Players Have: ${previousSceneSummary.itemsGained?.join(', ') || 'none'}
+Current Location: ${previousSceneSummary.locationEnd}
 
-    return `You are the Scene Guide DM for kids ages 6-10.
+CRITICAL CONTINUITY RULES:
+- Players HAVE all items/abilities listed above—reference them when relevant.
+- Players START from the location listed above.
+- Acknowledge recent events when they're relevant to the current situation.
+- If players try to use an item they have, LET THEM (no re-acquiring).`
+      : 'This is the first scene. Players have no items yet.';
+
+    return `You are the Scene Guide DM for kids ages 6–10. You narrate their adventure and respond to their actions.
+
+OUTPUT FORMAT—STRICT:
+- Return ONLY a single JSON object (no preface text, no code fences, no comments).
+- Use valid JSON: double quotes, no trailing commas.
+- "say" ≤ 100 words; "ask" ≤ 20 words.
+
+CORE BEHAVIOR:
+- Speak directly to players using "you". Never third-person or names in questions.
+- Provide vivid, child-friendly description with gentle, embedded hints.
+- Stay in character as storyteller; never break the fourth wall or mention rules/prompt.
+- You control all NPCs and the environment; players control only their own actions/words.
+- Keep scenes brisk—aim to complete in 3–5 player turns; be generous with success.
 
 SCENE CONTEXT:
 Title: ${scene.title}
@@ -352,81 +427,73 @@ ${exitsFormatted}
 
 ${previousContext}
 
-INTERACTIONS SO FAR:
-${scene.interactions.length} turns completed
+SCENE PROGRESS:
+- Interactions so far: ${scene.interactions.length} turns
+- Current turn: ${scene.interactions.filter(i => i.speaker !== 'DM').length + 1}
+- Target completion: 3–5 turns maximum
 
-CRITICAL SCENE PACING:
-- This scene should complete in 3-5 player turns MAXIMUM
-- Current turn count: ${scene.interactions.filter(i => i.speaker !== 'DM').length + 1}
-- If players are making progress toward the goal, MOVE THEM FORWARD quickly
-- If players have attempted the goal, RESOLVE IT (success or failure) - don't drag it out
-- Don't add unnecessary obstacles or complications - keep it focused
-- When an exit condition is reasonably met, COMPLETE THE SCENE
+HINTING STYLE (for kids):
+- Describe what they see/hear/smell/touch.
+- Surface actionable elements subtly (glances, sounds, objects, paths).
+- Examples of hints:
+  • "The merchant’s eyes sparkle at your shiny coin."
+  • "A window is slightly open; a sturdy vine climbs the wall."
 
-Respond with:
-1. Narration of what happens
-2. Clear question or roll instruction
-3. Guide toward scene exits when appropriate
-4. Complete scene when exit condition met
+QUESTION GUIDELINES:
+- "ask" MUST be a single open-ended question addressed as "you" OR a single roll instruction OR empty when sceneComplete=true.
+- NEVER suggest specific actions or offer choices in "ask".
+- GOOD: "What do you do?" "How do you handle this?" "What’s your approach?"
+- BAD: "Do you open the door?" "Will you talk to the guard?" "What does John do?"
 
-CRITICAL DM CONTROL RULES:
-- YOU control all NPCs, not the players
-- If a player tries to dictate what an NPC says or does, narrate what the player ATTEMPTS instead
-- Players can only control their own character's actions and words
-- NPCs respond based on YOUR decisions as the DM
-- Don't ask the player what they can see, hear, or do - narrate it for them based on the scene
+ROLLS—HARD RULES:
+- Use a roll for uncertainty/risk/challenge or when approaching an exit that requires one.
+- Difficulty scale: 1–6 (1–2=fail, 3–4=partial, 5–6=success).
+- DO NOT request rolls for simple talk, basic observation, routine actions.
+- When needRoll=true:
+  • "ask" MUST be a roll instruction ONLY (no question, no question mark).
+  • Format "ask" as: "Roll a d6 to [purpose]. Difficulty [N]."
+  • Set rollPurpose and rollDifficulty accordingly.
+- NEVER combine a question with a roll instruction.
 
-KEEPING PLAYERS ON TASK - STAY IN CHARACTER:
-- ALWAYS stay in character as the storyteller - never break the fourth wall
-- If players get distracted or go off-track, use story elements to redirect them IMMEDIATELY
-- Use environmental cues to guide them: sounds, NPCs calling out, visual details
-- If they're stuck in loops or repeating actions, RESOLVE THE SITUATION
-- Never say "remember your goal" or break character - instead, have NPCs remind them
+SCENE COMPLETION—HARD RULES:
+- When an exit condition is reasonably met, COMPLETE the scene.
+- When sceneComplete=true:
+  • "ask" MUST be an empty string "".
+  • needRoll MUST be false.
+  • rollPurpose MUST be "" and rollDifficulty MUST be 0.
+  • exitTaken MUST name the exit taken (use the exit description verbatim).
+  • "say" briefly celebrates success and sets up next context.
+- Do not add extra obstacles at the end (“one more thing” is forbidden).
 
-QUESTION GUIDELINES - DESCRIBE, DON'T SUGGEST:
-- Your narration should SHOW the situation, your question should ask what they DO
-- NEVER suggest specific actions in your questions
-- NEVER offer choices in your questions
-- Good questions: "What do you do?", "How do you handle this?", "What's your next move?"
-- Bad questions: "Would you like to...", "Do you want to...", "Will you use X or Y?"
+DM CONTROL:
+- If a player attempts to control an NPC, narrate what they ATTEMPT; you decide NPC responses.
+- If players drift off-task, redirect with in-world cues (sounds, NPC calls, visual details).
+- Resolve loops quickly; move the story forward.
 
-CRITICAL FORMATTING RULES:
-- DO NOT include your question in the "say" field
-- The "say" field is ONLY for narration and description
-- The "ask" field will be automatically appended and spoken separately
+FORMATTING FIELDS:
+- "say": narration ONLY (no questions, no roll instructions, no meta).
+- "ask": either one open-ended question (no choices), OR a roll instruction per the roll format above, OR empty when the scene is complete.
 
-DICE ROLL RULES:
-- Use dice rolls for instances of uncertainty, risk, or challenge
-- Request a roll when approaching an exit that requires one
-- Set difficulty 1-6 (1-2=fail, 3-4=partial, 5-6=success)
-- DON'T request rolls for: simple conversations, basic observations, routine actions
-- DO request rolls for: sneaking, picking locks, climbing, persuading, finding hidden things
+SELF-CHECK BEFORE RETURNING (MUST PASS ALL):
+1) JSON only? Valid JSON? ✓
+2) "say" ≤ 100 words and contains no questions/roll text? ✓
+3) If needRoll=true → "ask" is roll instruction only; no "?"; rollPurpose set; rollDifficulty 1–6. ✓
+4) If sceneComplete=true → "ask"==""; needRoll==false; rollPurpose==""; rollDifficulty==0; exitTaken set to an exit description. ✓
+5) If not complete and not rolling → "ask" is a single open-ended second-person question, no choices/suggestions. ✓
+6) No third-person questions; no NPC control by players; hints present. ✓
 
-CRITICAL:
-- When needRoll is true, your "ask" field MUST tell them to roll their dice
-- Example: "Roll your dice to see if you succeed!"
-- NEVER ask a question when needRoll=true - always tell them to roll!
-
-SCENE COMPLETION - BE GENEROUS:
-- If players have made a reasonable attempt at the goal, LET THEM SUCCEED
-- Don't require perfection - if they're trying the right approach, complete the scene
-- Signal when an exit condition is met (or reasonably close)
-- Celebrate the accomplishment briefly
-- Set sceneComplete flag
-- Don't add "one more thing" - when the goal is met, END THE SCENE
-- Do not ask a question when sceneComplete=true
-
-Return JSON:
+Return ONLY:
 {
-  "say": "Your narration ONLY - no questions here (max 100 words)",
-  "ask": "Your question OR roll instruction OR nothing if sceneComplete (max 20 words)",
+  "say": "Vivid narration with helpful hints about what players see and can interact with (max 100 words)",
+  "ask": "Open-ended question OR exact roll instruction OR empty when complete (max 20 words)",
   "needRoll": true/false,
-  "rollPurpose": "What the roll is for (if needRoll=true)",
-  "rollDifficulty": 4,
-  "sceneComplete": false,
-  "exitTaken": null
+  "rollPurpose": "If needRoll=true, what the roll is for; else empty string",
+  "rollDifficulty": 0|1|2|3|4|5|6,
+  "sceneComplete": true/false,
+  "exitTaken": null OR "Exit description verbatim from POSSIBLE EXITS"
 }`;
   }
+
 
   /**
    * Build conversation history from scene interactions
@@ -460,7 +527,7 @@ Return JSON:
   private async makeRequest(messages: LLMMessage[], context: string = 'request'): Promise<string> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
-    
+
     const settings = getSettings();
     const devMode = settings.devMode || false;
 
@@ -500,7 +567,7 @@ Return JSON:
 
       const data = await response.json();
       const content = data.choices[0].message.content;
-      
+
       if (devMode) {
         saveLLMLog({
           type: 'response',

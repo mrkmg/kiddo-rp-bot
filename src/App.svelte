@@ -9,7 +9,7 @@
  * - Provides error handling and user feedback
  */
 
-import { onMount, onDestroy } from 'svelte';
+import { onMount, onDestroy, untrack } from 'svelte';
 import { sessionStore } from './stores/session';
 import type { SceneDefinition } from './stores/session';
 import TalkButton from './components/TalkButton.svelte';
@@ -26,6 +26,7 @@ import { TTSService } from './services/tts';
 import { sceneManager } from './services/sceneManager';
 import type { SceneDirective } from './services/storyGuide';
 import { getSettings, saveSettings, type Settings } from './utils/storage';
+import { getMicrophoneDevices } from './utils/permissions';
 import {
   handleError,
   showErrorToast,
@@ -51,6 +52,7 @@ let toastAction = $state<RecoveryAction | undefined>(undefined);
 
 // Settings
 let settings = $state<Settings>(getSettings());
+let availableMicrophones = $state<MediaDeviceInfo[]>([]);
 
 // Controllers and services
 let turnController = $state<TurnController>() as TurnController;
@@ -62,6 +64,27 @@ let ttsService = $state<TTSService>() as TTSService;
 
 // Story state
 let currentDirective = $state<SceneDirective | null>(null);
+
+// Track state changes for persistence using untrack to avoid infinite loops
+$effect(() => {
+  // Only track the variables we want to react to
+  const state = turnController?.getState() || 'idle';
+  const roller = showDiceRoller;
+  const difficulty = currentRollDifficulty;
+  const directive = currentDirective;
+  
+  // Use untrack to prevent reading sessionStore from triggering this effect
+  untrack(() => {
+    if ($sessionStore.id) {
+      sessionStore.updateAppState({
+        turnState: state,
+        showDiceRoller: roller,
+        currentRollDifficulty: difficulty,
+        pendingDirective: directive,
+      });
+    }
+  });
+});
 
 /**
  * Initialize services with API keys from settings
@@ -344,6 +367,9 @@ async function handlePlayerTranscribed(text: string) {
     // Transition to thinking state
     turnController.transition('thinking');
     
+    // Save player input for potential resumption
+    sessionStore.updateAppState({ lastPlayerInput: text });
+    
     // Get current scene
     const currentScene = sessionStore.getCurrentScene();
     if (!currentScene) {
@@ -375,6 +401,9 @@ async function handlePlayerTranscribed(text: string) {
       text,
       previousSummary
     );
+    
+    // Clear saved player input since we successfully processed it
+    sessionStore.updateAppState({ lastPlayerInput: undefined });
     
     // Add DM response to scene with raw JSON
     sessionStore.addSceneInteraction({
@@ -582,13 +611,14 @@ async function playDMResponse(text: string, needsRoll: boolean = false, onComple
     // Transition to speaking state
     turnController.transition('speaking');
     
-    // Generate TTS audio
-    const speechResult = await ttsService.synthesize({ text });
+    // Generate TTS audio using streaming for lower latency
+    const streamingResult = await ttsService.synthesizeStreaming({ text });
     
-    // Enqueue audio for playback
+    // Enqueue streaming audio for playback
+    // Audio will start playing as soon as first chunks arrive
     audioQueue.enqueue({
       id: `dm-${Date.now()}`,
-      audio: speechResult.audioBlob || speechResult.audioUrl || '',
+      audio: streamingResult.audioStream,
       text,
       onEnd: async () => {
         // If custom completion handler provided, use it
@@ -606,6 +636,8 @@ async function playDMResponse(text: string, needsRoll: boolean = false, onComple
       onError: async (error) => {
         console.error('TTS playback error:', error);
         showErrorToast('Audio playback failed. Showing text only.', undefined, 3000);
+        // Cancel the stream
+        streamingResult.cancel();
         // Fall back to text-only display
         if (onComplete) {
           await onComplete();
@@ -635,9 +667,76 @@ async function playDMResponse(text: string, needsRoll: boolean = false, onComple
 /**
  * Handle resume session
  */
-function handleResumeSession() {
+async function handleResumeSession() {
   showResumeDialog = false;
-  // Session is already loaded, just continue
+  
+  // Restore app state from saved session
+  const appState = sessionStore.getAppState();
+  if (!appState) return;
+  
+  // Restore state variables
+  if (appState.showDiceRoller) {
+    showDiceRoller = true;
+    currentRollDifficulty = appState.currentRollDifficulty;
+  }
+  
+  if (appState.pendingDirective) {
+    currentDirective = appState.pendingDirective;
+  }
+  
+  // Restore turn controller state
+  const savedState = appState.turnState;
+  if (savedState && savedState !== 'idle') {
+    console.log(`[Resume] Restoring state: ${savedState}`);
+    
+    // Handle different states
+    switch (savedState) {
+      case 'awaiting_roll':
+        // Show dice roller if we were waiting for a roll
+        if (!showDiceRoller) {
+          showDiceRoller = true;
+        }
+        turnController.transition('awaiting_roll');
+        break;
+        
+      case 'scene_setup':
+      case 'scene_summary':
+      case 'story_init':
+      case 'story_update':
+        // These states should continue their async operations
+        // For now, transition to the state and let the operation resume
+        turnController.transition(savedState as any);
+        
+        // If we have a pending directive, try to continue scene creation
+        if (savedState === 'scene_setup' && currentDirective) {
+          await createSceneFromDirective(currentDirective);
+        }
+        break;
+        
+      case 'speaking':
+        // If we were speaking, the audio is lost - transition to idle
+        console.log('[Resume] Was speaking, transitioning to idle');
+        turnController.transition('idle');
+        break;
+        
+      case 'thinking':
+        // If we were thinking, we can retry with the last player input
+        console.log('[Resume] Was thinking, retrying with last player input');
+        if (appState.lastPlayerInput) {
+          // Re-process the last player input
+          await handlePlayerTranscribed(appState.lastPlayerInput);
+        } else {
+          // No saved input, transition to idle
+          console.log('[Resume] No saved player input, transitioning to idle');
+          turnController.transition('idle');
+        }
+        break;
+        
+      default:
+        // For other states, reset to idle
+        turnController.reset();
+    }
+  }
 }
 
 /**
@@ -775,6 +874,23 @@ function handleEndSession() {
 }
 
 /**
+ * Load available microphones for settings
+ */
+async function loadMicrophonesForSettings() {
+  try {
+    const devices = await getMicrophoneDevices();
+    availableMicrophones = devices;
+    
+    // Auto-select the first microphone if none selected
+    if (devices.length > 0 && !settings.selectedMicrophoneId) {
+      settings.selectedMicrophoneId = devices[0].deviceId;
+    }
+  } catch (error) {
+    console.error('Failed to load microphones:', error);
+  }
+}
+
+/**
  * Handle settings save
  */
 function handleSaveSettings() {
@@ -797,6 +913,14 @@ function handleSaveSettings() {
     const errorInfo = handleError(error as Error, 'saveSettings');
     showErrorToast(errorInfo.userMessage, errorInfo.recoveryAction);
   }
+}
+
+/**
+ * Handle settings modal open
+ */
+async function handleOpenSettings() {
+  showSettings = true;
+  await loadMicrophonesForSettings();
 }
 </script>
 
@@ -845,6 +969,30 @@ function handleSaveSettings() {
               placeholder="..."
               class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-600 focus:outline-none"
             />
+          </div>
+          
+          <div>
+            <label for="microphone-select" class="block text-sm font-bold text-gray-700 mb-2">
+              Microphone:
+            </label>
+            {#if availableMicrophones.length > 0}
+              <select
+                id="microphone-select"
+                bind:value={settings.selectedMicrophoneId}
+                class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-600 focus:outline-none bg-white"
+              >
+                {#each availableMicrophones as mic}
+                  <option value={mic.deviceId}>
+                    {mic.label || `Microphone ${availableMicrophones.indexOf(mic) + 1}`}
+                  </option>
+                {/each}
+              </select>
+              <p class="text-xs text-gray-500 mt-1">
+                {availableMicrophones.length} microphone{availableMicrophones.length !== 1 ? 's' : ''} detected
+              </p>
+            {:else}
+              <p class="text-sm text-gray-500 italic">No microphones detected. Please connect a microphone and reopen settings.</p>
+            {/if}
           </div>
           
           <div class="bg-green-50 border-l-4 border-green-400 p-4">
@@ -954,7 +1102,7 @@ function handleSaveSettings() {
           </div>
           <div class="flex space-x-2">
             <button
-              onclick={() => showSettings = true}
+              onclick={handleOpenSettings}
               class="w-10 h-10 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center transition-colors duration-200 text-white"
               title="Settings"
             >
