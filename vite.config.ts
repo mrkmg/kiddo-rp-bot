@@ -116,7 +116,9 @@ export default defineConfig({
         ]
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,wasm}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        // Exclude large WASM files from precaching
+        globIgnores: ['**/vad/*.wasm'],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/api\.openai\.com\/.*/i,
@@ -130,6 +132,30 @@ export default defineConfig({
             handler: 'NetworkOnly',
             options: {
               cacheName: 'openrouter-api-cache',
+            }
+          },
+          {
+            // Cache VAD WASM files on-demand with CacheFirst strategy
+            urlPattern: /\/vad\/.*\.wasm$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'vad-wasm-cache',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 days
+              }
+            }
+          },
+          {
+            // Cache VAD ONNX models on-demand
+            urlPattern: /\/vad\/.*\.onnx$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'vad-models-cache',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 days
+              }
             }
           }
         ]
