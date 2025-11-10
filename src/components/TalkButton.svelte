@@ -341,6 +341,12 @@ function getButtonColor(): string {
     case 'transcribing':
     case 'thinking':
       return 'bg-yellow-500 hover:bg-yellow-600';
+    case 'story_init':
+    case 'story_update':
+    case 'scene_setup':
+    case 'scene_transition':
+    case 'scene_summary':
+      return 'bg-indigo-500 hover:bg-indigo-600';
     case 'speaking':
       return 'bg-blue-500 hover:bg-blue-600 animate-pulse';
     case 'awaiting_roll':

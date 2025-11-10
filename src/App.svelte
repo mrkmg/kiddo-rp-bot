@@ -24,6 +24,7 @@ import { StoryGuideService } from './services/storyGuide';
 import { SceneGuideService } from './services/sceneGuide';
 import { TTSService } from './services/tts';
 import { sceneManager } from './services/sceneManager';
+import { ScenePreprocessor } from './services/scenePreprocessor';
 import type { SceneDirective } from './services/storyGuide';
 import { getSettings, saveSettings, type Settings } from './utils/storage';
 import { getMicrophoneDevices } from './utils/permissions';
@@ -61,6 +62,7 @@ let sttService = $state<STTService>() as STTService;
 let storyGuideService = $state<StoryGuideService>() as StoryGuideService;
 let sceneGuideService = $state<SceneGuideService>() as SceneGuideService;
 let ttsService = $state<TTSService>() as TTSService;
+let scenePreprocessor: ScenePreprocessor;
 
 // Story state
 let currentDirective = $state<SceneDirective | null>(null);
@@ -113,6 +115,11 @@ function initializeServices() {
     ttsService = new TTSService({
       apiKey: settings.humeApiKey || '',
     });
+
+    scenePreprocessor = new ScenePreprocessor(
+      storyGuideService,
+      sceneGuideService
+    );
 
     isInitialized = true;
   } catch (error) {
@@ -432,6 +439,28 @@ async function handlePlayerTranscribed(text: string) {
     
     // Handle scene completion
     if (response.sceneComplete) {
+      // Start pre-processing the next scene DURING the final speech
+      // This reduces wait time between scenes
+      const currentStoryState = {
+        id: sessionStore.current.id,
+        theme: sessionStore.current.storyState.theme,
+        overallGoal: sessionStore.current.storyState.overallGoal,
+        targetSceneCount: sessionStore.current.storyState.targetSceneCount,
+        currentPhase: sessionStore.current.storyState.currentPhase,
+        storyPlan: sessionStore.current.storyState.storyPlan,
+        completedScenes: sessionStore.current.storyContext.completedScenes,
+        createdAt: sessionStore.current.createdAt,
+        updatedAt: sessionStore.current.updatedAt,
+      };
+      
+      // Start pre-processing in background
+      scenePreprocessor.startPreprocessing(
+        currentScene,
+        response.exitTaken,
+        currentStoryState,
+        sessionStore.current.players
+      );
+      
       // Play the final DM message, then transition to scene_summary when it finishes
       await playDMResponse(`${response.say} ${response.ask}`, false, async () => {
         // This callback runs after the audio finishes playing
@@ -461,12 +490,10 @@ async function handlePlayerTranscribed(text: string) {
 
 /**
  * Handle scene completion and story update
+ * ALWAYS uses preprocessor - waits for it and updates UI state based on preprocessing stage
  */
 async function handleSceneComplete(scene: SceneDefinition, exitTaken?: string) {
   try {
-    // Transition to scene_summary state
-    turnController.transition('scene_summary');
-    
     // Mark scene as complete
     sessionStore.updateCurrentScene({
       status: 'complete',
@@ -480,42 +507,35 @@ async function handleSceneComplete(scene: SceneDefinition, exitTaken?: string) {
       throw new Error('No current scene found for summary');
     }
     
-    // Generate scene summary using Scene Guide
-    const summaryResponse = await sceneGuideService.summarizeScene(updatedScene);
+    // ALWAYS use the preprocessor - wait for it and update UI based on stage
+    console.log('[handleSceneComplete] Waiting for preprocessor...');
     
-    // Create and save summary
-    const summary = sceneManager.createSceneSummary(
-      updatedScene,
-      summaryResponse.summary,
-      summaryResponse.keyEvents,
-      summaryResponse.itemsGained,
-      summaryResponse.locationEnd,
-      summaryResponse.characterDevelopment
-    );
+    // Check current stage and update UI accordingly
+    const currentStage = scenePreprocessor.getStage(scene.id);
+    console.log('[handleSceneComplete] Current preprocessing stage:', currentStage);
     
+    // Update turn controller state based on preprocessing stage
+    if (currentStage === 'summarizing' || currentStage === 'idle') {
+      turnController.transition('scene_summary');
+    } else if (currentStage === 'updating_story') {
+      turnController.transition('story_update');
+    } else if (currentStage === 'creating_scene') {
+      turnController.transition('scene_setup');
+    }
+    
+    // Wait for preprocessing to complete
+    const preprocessedResult = await scenePreprocessor.getResult(scene.id);
+    
+    if (!preprocessedResult) {
+      throw new Error('Preprocessing failed - no result available');
+    }
+    
+    console.log('[handleSceneComplete] Using preprocessed results! 🚀');
+    
+    const { summary, storyUpdate, sceneSetup } = preprocessedResult;
+    
+    // Save summary to session
     sessionStore.completeCurrentScene(summary);
-    
-    // Transition to story_update state
-    turnController.transition('story_update');
-    
-    // Build complete StoryState for Story Guide
-    const currentStoryState = {
-      id: sessionStore.current.id,
-      theme: sessionStore.current.storyState.theme,
-      overallGoal: sessionStore.current.storyState.overallGoal,
-      targetSceneCount: sessionStore.current.storyState.targetSceneCount,
-      currentPhase: sessionStore.current.storyState.currentPhase,
-      storyPlan: sessionStore.current.storyState.storyPlan,
-      completedScenes: sessionStore.current.storyContext.completedScenes,
-      createdAt: sessionStore.current.createdAt,
-      updatedAt: sessionStore.current.updatedAt,
-    };
-    
-    // Update story state with Story Guide
-    const storyUpdate = await storyGuideService.updateStoryState(
-      currentStoryState,
-      summary
-    );
     
     // Update story state in session
     sessionStore.updateStoryState({
@@ -526,7 +546,7 @@ async function handleSceneComplete(scene: SceneDefinition, exitTaken?: string) {
     // Check if story is complete
     if (storyUpdate.storyComplete && storyUpdate.epilogueNarration) {
       // Add epilogue to transcript
-      const epilogueMessage = `🎉 THE END 🎉\n\n${storyUpdate.epilogueNarration}\n\nThank you for playing! Your adventure has been saved.`;
+      const epilogueMessage = `🎉 THE END 🎉\n\n${storyUpdate.epilogueNarration}\n\nThank you for playing!`;
       
       sessionStore.addTranscriptEntry({
         speaker: 'DM',
@@ -551,10 +571,51 @@ async function handleSceneComplete(scene: SceneDefinition, exitTaken?: string) {
       return;
     }
     
-    // Story continues - create next scene from directive
+    // Story continues - use preprocessed scene if available
     if (storyUpdate.nextSceneDirective) {
-      currentDirective = storyUpdate.nextSceneDirective;
-      await createSceneFromDirective(currentDirective);
+      const directive = storyUpdate.nextSceneDirective;
+      currentDirective = directive;
+      
+      if (sceneSetup) {
+        // We have preprocessed scene setup - use it directly!
+        console.log('[handleSceneComplete] Using preprocessed scene setup! 🚀');
+        
+        // Transition to scene_setup state briefly for UI feedback
+        turnController.transition('scene_setup');
+        
+        // Create scene structure
+        const newScene = sceneManager.createSceneStructure(
+          directive.sceneNumber,
+          sceneSetup.title,
+          sceneSetup.setting,
+          sceneSetup.situation,
+          sceneSetup.internalGoal,
+          sceneSetup.possibleExits
+        );
+        
+        // Add scene to session
+        sessionStore.addScene(newScene);
+        
+        // Add opening narration as DM interaction
+        const fullOpening = `${sceneSetup.openingNarration} ${sceneSetup.openingQuestion}`;
+        sessionStore.addSceneInteraction({
+          speaker: 'DM',
+          text: fullOpening,
+        });
+        
+        // Also add to legacy transcript for display
+        sessionStore.addTranscriptEntry({
+          speaker: 'DM',
+          playerName: 'DM',
+          text: fullOpening,
+        });
+        
+        // Generate and play TTS
+        await playDMResponse(fullOpening);
+      } else {
+        // No preprocessed scene (story might be ending), create normally
+        await createSceneFromDirective(directive);
+      }
     } else {
       throw new Error('Story not complete but no next scene directive provided');
     }
