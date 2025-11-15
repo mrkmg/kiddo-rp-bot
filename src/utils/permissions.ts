@@ -24,12 +24,12 @@ export async function requestMicrophonePermission(): Promise<boolean> {
 
     // Request microphone access
     // This will trigger the browser's permission prompt
-    const stream = await navigator.mediaDevices.getUserMedia({ 
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
         sampleRate: 44100,
-      } 
+      }
     });
 
     // Permission granted - stop the stream immediately
@@ -46,11 +46,23 @@ export async function requestMicrophonePermission(): Promise<boolean> {
         // User explicitly denied permission
         return false;
       } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+        // On iOS, this often means no microphone permission was granted yet
+        const userAgent = navigator.userAgent.toLowerCase();
+        if (userAgent.includes('iphone') || userAgent.includes('ipad')) {
+          throw new Error('No microphone detected. Please ensure microphone access is enabled in Settings > Safari > Microphone, then refresh this page.');
+        }
         throw new Error('No microphone found. Please connect a microphone and try again.');
       } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
         throw new Error('Microphone is already in use by another application. Please close other apps and try again.');
       } else if (error.name === 'OverconstrainedError') {
-        throw new Error('Microphone does not meet the required specifications. Please try a different microphone.');
+        // Try again with simpler constraints for iOS compatibility
+        try {
+          const simpleStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          simpleStream.getTracks().forEach(track => track.stop());
+          return true;
+        } catch {
+          throw new Error('Microphone does not meet the required specifications. Please try a different microphone.');
+        }
       } else if (error.name === 'SecurityError') {
         throw new Error('Microphone access is blocked by your browser security settings. Please check your browser settings.');
       }
@@ -160,7 +172,32 @@ export async function isMicrophoneAvailable(): Promise<boolean> {
     }
 
     const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.some(device => device.kind === 'audioinput');
+    const audioInputs = devices.filter(device => device.kind === 'audioinput');
+    
+    // On iOS Safari, devices may appear but have empty labels until permission is granted
+    // If we find audio inputs but they all have empty labels, we need to request permission first
+    if (audioInputs.length > 0) {
+      const hasLabels = audioInputs.some(device => device.label && device.label.trim() !== '');
+      
+      // If no labels, try to get permission to see actual devices
+      if (!hasLabels) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach(track => track.stop());
+          
+          // Re-enumerate after permission granted
+          const newDevices = await navigator.mediaDevices.enumerateDevices();
+          return newDevices.some(device => device.kind === 'audioinput');
+        } catch {
+          // Permission denied or no microphone
+          return false;
+        }
+      }
+      
+      return true;
+    }
+    
+    return false;
   } catch (error) {
     console.error('Failed to check microphone availability:', error);
     return false;
@@ -178,8 +215,30 @@ export async function getMicrophoneDevices(): Promise<MediaDeviceInfo[]> {
       return [];
     }
 
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.filter(device => device.kind === 'audioinput');
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    let audioInputs = devices.filter(device => device.kind === 'audioinput');
+    
+    // On iOS Safari, devices may have empty labels until permission is granted
+    if (audioInputs.length > 0) {
+      const hasLabels = audioInputs.some(device => device.label && device.label.trim() !== '');
+      
+      if (!hasLabels) {
+        try {
+          // Request permission to get actual device labels
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach(track => track.stop());
+          
+          // Re-enumerate after permission granted
+          devices = await navigator.mediaDevices.enumerateDevices();
+          audioInputs = devices.filter(device => device.kind === 'audioinput');
+        } catch {
+          // Permission denied, return devices without labels
+          return audioInputs;
+        }
+      }
+    }
+    
+    return audioInputs;
   } catch (error) {
     console.error('Failed to get microphone devices:', error);
     return [];

@@ -86,13 +86,23 @@ export class STTService {
     try {
       // Request microphone access if we don't have a stream
       if (!this.stream) {
-        this.stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            sampleRate: 44100,
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              sampleRate: 44100,
+            }
+          });
+        } catch (error) {
+          // If constraints fail (common on iOS), try with simpler constraints
+          if ((error as Error).name === 'OverconstrainedError' || (error as Error).name === 'NotFoundError') {
+            console.warn('Advanced audio constraints failed, trying basic constraints');
+            this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          } else {
+            throw error;
           }
-        });
+        }
 
         // Initialize VAD once with the stream
         if (this.config.enableVAD && this.vadService) {
