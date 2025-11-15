@@ -82,6 +82,13 @@ export class VADService {
       this.speechDetected = false;
       this.speechFrameCount = 0;
 
+      // Detect iOS/Safari
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+      
+      console.log('[VAD] Initializing...', { isIOS, isSafari });
+
       // Create VAD instance with new API
       this.vad = await MicVAD.new({
         positiveSpeechThreshold: this.config.positiveSpeechThreshold,
@@ -123,6 +130,20 @@ export class VADService {
       console.log('[VAD] Initialized successfully');
     } catch (error) {
       console.error('[VAD] Initialization failed:', error);
+      
+      // On iOS, VAD might fail to initialize due to WASM/worklet issues
+      // Log the error but don't throw - we'll disable VAD and allow recording without it
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      
+      if (isIOS) {
+        console.warn('[VAD] VAD initialization failed on iOS - continuing without VAD');
+        // Mark as initialized but with null vad to allow recording without VAD
+        this.isInitialized = true;
+        this.vad = null;
+        return;
+      }
+      
       throw new Error(`Failed to initialize VAD: ${(error as Error).message}`);
     }
   }
@@ -132,7 +153,11 @@ export class VADService {
    */
   start(): void {
     if (!this.vad) {
-      throw new Error('VAD not initialized');
+      console.warn('[VAD] VAD not available - skipping VAD processing');
+      // Assume speech is present if VAD is not available (iOS fallback)
+      this.speechDetected = true;
+      this.speechFrameCount = 1;
+      return;
     }
     
     this.speechDetected = false;
@@ -155,6 +180,10 @@ export class VADService {
    * Check if speech was detected during recording
    */
   hasSpeech(): boolean {
+    // If VAD is not available (iOS fallback), always return true
+    if (!this.vad) {
+      return true;
+    }
     return this.speechDetected && this.speechFrameCount > 0;
   }
 
