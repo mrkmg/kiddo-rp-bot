@@ -41,10 +41,67 @@ export class AudioQueue {
   private statusListeners: Set<StatusChangeCallback> = new Set();
   private itemListeners: Set<ItemChangeCallback> = new Set();
   private objectUrls: Set<string> = new Set(); // Track created object URLs for cleanup
+  private audioContext: AudioContext | null = null;
+  private isAudioUnlocked: boolean = false;
 
   constructor() {
     // Initialize with idle state
     this.status = 'idle';
+    
+    // Initialize audio context for iOS
+    this.initAudioContext();
+  }
+
+  /**
+   * Initialize audio context and unlock audio for iOS
+   * iOS requires user interaction to enable audio playback
+   */
+  private initAudioContext(): void {
+    try {
+      // Create audio context
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextClass) {
+        this.audioContext = new AudioContextClass();
+      }
+    } catch (error) {
+      console.warn('Failed to create AudioContext:', error);
+    }
+  }
+
+  /**
+   * Unlock audio playback for iOS
+   * Must be called from a user interaction event (click, touch, etc.)
+   * This creates a silent audio buffer and plays it to unlock the audio system
+   */
+  async unlockAudio(): Promise<void> {
+    if (this.isAudioUnlocked) {
+      return;
+    }
+
+    try {
+      // Method 1: Resume AudioContext (required for iOS)
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+
+      // Method 2: Play a silent audio element (iOS Safari requirement)
+      const silentAudio = new Audio();
+      silentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      silentAudio.volume = 0;
+      
+      try {
+        await silentAudio.play();
+        silentAudio.pause();
+        silentAudio.remove();
+      } catch (e) {
+        // Ignore errors from silent audio
+      }
+
+      this.isAudioUnlocked = true;
+      console.log('Audio unlocked for iOS');
+    } catch (error) {
+      console.warn('Failed to unlock audio:', error);
+    }
   }
 
   /**
@@ -109,8 +166,15 @@ export class AudioQueue {
    * Play static audio (Blob or URL)
    */
   private async playStaticAudio(audio: Blob | string): Promise<void> {
+    // Ensure audio is unlocked for iOS
+    await this.unlockAudio();
+
     // Create audio element
     this.currentAudio = new Audio();
+    
+    // iOS-specific settings for better compatibility
+    this.currentAudio.preload = 'auto';
+    (this.currentAudio as any).playsInline = true; // Required for iOS to play inline
     
     // Set audio source (handle both Blob and URL)
     if (audio instanceof Blob) {
@@ -120,6 +184,13 @@ export class AudioQueue {
     } else {
       this.currentAudio.src = audio;
     }
+
+    // Load the audio before playing (important for iOS)
+    await new Promise<void>((resolve, reject) => {
+      this.currentAudio!.onloadeddata = () => resolve();
+      this.currentAudio!.onerror = () => reject(new Error('Failed to load audio'));
+      this.currentAudio!.load();
+    });
 
     // Set up event handlers
     this.currentAudio.onplay = () => {
@@ -142,7 +213,16 @@ export class AudioQueue {
     };
 
     // Start playback
-    await this.currentAudio.play();
+    try {
+      await this.currentAudio.play();
+    } catch (error) {
+      // Handle iOS autoplay restrictions
+      if (error instanceof Error && error.name === 'NotAllowedError') {
+        console.warn('Audio playback blocked - user interaction required');
+        throw new Error('Audio playback requires user interaction on iOS');
+      }
+      throw error;
+    }
   }
 
   /**
@@ -150,8 +230,17 @@ export class AudioQueue {
    * Uses MediaSource API for seamless streaming playback
    */
   private async playStreamingAudio(audioStream: AsyncIterable<Uint8Array>): Promise<void> {
-    // Create audio context for streaming playback
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    // Ensure audio is unlocked for iOS
+    await this.unlockAudio();
+
+    // Use existing audio context or create new one
+    const audioContext = this.audioContext || new (window.AudioContext || (window as any).webkitAudioContext)();
+    
+    // Resume context if suspended (iOS requirement)
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+    
     let startTime = audioContext.currentTime;
     let hasStarted = false;
 
@@ -462,6 +551,12 @@ export class AudioQueue {
     // Clear listeners
     this.statusListeners.clear();
     this.itemListeners.clear();
+    
+    // Close audio context
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
   }
 }
 

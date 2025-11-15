@@ -252,6 +252,9 @@ async function startAdventure() {
   try {
     console.log('[startAdventure] Starting adventure, current state:', turnController.getState());
     
+    // Unlock audio for iOS (must be called during user interaction)
+    await audioQueue.unlockAudio();
+    
     // Check if online
     if (!isOnline()) {
       showErrorToast('You need to be online to start an adventure.', {
