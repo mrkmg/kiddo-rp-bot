@@ -988,8 +988,8 @@ async function handleOpenSettings() {
 <main class="min-h-screen bg-linear-to-b from-purple-50 to-blue-50">
   {#if showSettings}
     <!-- Settings Modal -->
-    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8">
+    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+      <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 my-8 max-h-[90vh] overflow-y-auto">
         <h2 class="text-3xl font-bold text-gray-900 mb-6">Settings</h2>
         
         <div class="space-y-4">
